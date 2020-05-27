@@ -7,6 +7,8 @@ import traceback
 
 import psycopg2
 
+from unittest.mock import Mock
+
 
 DEFAULT_CONFIG = 'config.json'
 
@@ -16,9 +18,112 @@ def getcon(from_src=True, **kwargs):
     return psycopg2.connect(**conn_args)
 
 
-def init_etl(conn, cursor):
-    cursor.execute('select * from test1')
-    print(cursor.fetchone())
+def handle_summarization(src_cursor, dst_cursor, sales_data):
+    cd_ven, cd_loj, dt_ven, nm_vdd, nm_loj, nm_cli = sales_data
+
+    src_cursor.execute(installment_list_from_sale_expr(), (cd_ven, cd_loj))
+
+    # calculate the metrics
+    instmnt_preddicted_count, instmnt_late_count, instmnt_paid_count, instmnt_preddicted_value = 0, 0, 0, 0  
+    for installment in src_cursor.fetchall():
+        dt_vcto, vl_par, dt_pagto, vl_pago = installment
+        
+        if vl_pago:
+            instmnt_paid_count += 1
+        else:
+            instmnt_preddicted_count += 1
+            instmnt_preddicted_value += vl_par
+
+        # isolate check for late payments, because it be also be considered as paid
+        if dt_pagto and dt_vcto < dt_pagto:
+            instmnt_late_count += 1
+
+    dst_cursor.execute('select cd_tempo from tempo where ano = %s and mes = %s', 
+                    (dt_ven.year, dt_ven.month))
+    time_dimension = dst_cursor.fetchone() 
+    if time_dimension is None:
+        dst_cursor.execute('insert into tempo (ano, mes) values (%s, %s) returning cd_tempo', 
+                        (dt_ven.year, dt_ven.month))
+        time_dimension = dst_cursor.fetchone()
+
+    dst_cursor.execute('select cd_loja from loja where nm_loja = %s', (nm_loj))
+    store_dimension = dst_cursor.fetchone()
+    if store_dimension is None:
+        dst_cursor.execute('insert into loja (nm_loja) values (%s) returning cd_loja', (nm_loj))
+        store_dimension = dst_cursor.fetchone()
+
+    dst_cursor.execute('select cd_cliente from cliente where nm_cliente = %s', (nm_cli))
+    client_dimension = dst_cursor.fetchone()
+    if store_dimension is None:
+        dst_cursor.execute('insert into cliente (nm_cliente) values (%s) returning cd_cliente', (nm_cli))
+        client_dimension = dst_cursor.fetchone()
+
+    dst_cursor.execute('select cd_vendedor from vendedor where nm_vendedor = %s', (nm_vdd))
+    sales_man_dimension = dst_cursor.fetchone()
+    if sales_man_dimension is None:
+        dst_cursor.execute('INSERT INTO vendedor (nm_vendedor) values (%s) returning cd_vendedor', (nm_vdd))
+        sales_man_dimension = dst_cursor.fetchone()
+
+    # actually insert data into fact table
+    dst_cursor.execute("""
+insert into venda 
+(cd_venda, cdt_tempo, cd_cliente, cd_vendedor, nr_par_previstas, nr_par_atrasadas, nr_par_pagas, vlr_par_previstas)
+values
+(%d, %d, %d, %d, %d, %d %d, %d)
+""", (
+    cd_ven, 
+    time_dimension[0],
+    client_dimension[0],
+    sales_man_dimension[0], 
+    instmnt_preddicted_count,
+    instmnt_late_count,
+    instmnt_paid_count,
+    instmnt_preddicted_value))
+    
+    # commit whole transaction
+    dst_cursor.commit()
+
+
+def sales_list_expr():
+    return """
+select 
+    ven.cd_ven,
+    ven.cd_loj,
+    ven.dt_ven,
+    vdd.nm_vdd,
+    loj.nm_loj,
+    cli.nm_cli
+from venda as ven
+    left join vendedor as vdd on (ven.cd_vdd = vdd.cd_vdd)
+    left join loja as loj on (ven.cd_loj = loj.cd_loj)
+    left join cliente as cli on (ven.cd_cli = cli.cd_cli)
+"""
+
+
+def installment_list_from_sale_expr():
+    return """
+select 
+    par.dt_vcto,
+    par.vl_par,
+    par.dt_pagto,
+    par.vl_pago
+from parcela as par where par.cd_ven = %s and par.cd_loj = %s    
+"""
+
+
+def init_etl(src_cursor, dst_cursor):
+    src_cursor.execute(sales_list_expr())
+    for data in src_cursor.fetchall():
+        handle_summarization(src_cursor, dst_cursor, data)
+
+
+def test_cursor_execute_function(*args):
+    print('rcv from cursor.execute(): {}'.format(args))
+
+
+def test_cursor_fetchone_function():
+    print('rcv a cursor.fetchone()')
+    return [666]
 
 
 def load_config(config=DEFAULT_CONFIG):
@@ -33,18 +138,55 @@ def deduce_connection(cli_args, **kwargs):
 
 
 def main(args):
-    conn = deduce_connection(args)
-    cursor = conn.cursor()
+    if '--help' in args:
+        print("""
+Usage: {name} [--help] [--test] [CONFIG_FILE]
+
+Arguments:
+    CONFIG_FILE (optional) Specify a database conneciton configuration. (default={default_config})
+
+Options:
+    --test  Read data from source connection, summarize, but just print what it would do in destination
+            connection.
+    --help  Shows this message.
+""".format(name=sys.argv[0], default_config=DEFAULT_CONFIG))
+        return 128
+
+    isatest = '--test' in args
+    if isatest:
+        args.remove('--test')
+
+    # connect to source sgbd
+    src_conn = deduce_connection(args)
+    src_cursor = src_conn.cursor()
     
+    # connect to destination sgbd
+    dst_conn = deduce_connection(args, from_src=False)
+    dst_cursor = dst_conn.cursor()
+
+    # set that we want a 'read committed' level, so that we can commit by ourself
+    dst_conn.set_isolation_level(1)
+
+    test_cursor = Mock()
+    test_cursor.execute = test_cursor_execute_function 
+    test_cursor.fetchone = test_cursor_fetchone_function
+
     try:
-        init_etl(conn, cursor)
+        init_etl(src_cursor, test_cursor if isatest else dst_cursor)
     except:
         traceback.print_exc()
+        return 1
     finally:
-        print('Closing connection...')
-        cursor.close()
-        conn.close()
+        print('Closing source connection...')
+        src_cursor.close()
+        src_conn.close()
+
+        print('Closing destination connection...')
+        dst_cursor.close()
+        dst_conn.close()
+    
+    return 0
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
