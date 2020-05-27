@@ -1,0 +1,14 @@
+{
+    "src_conn": {
+        "dbname": "",
+        "host": "",
+        "user": "",
+        "password": ""
+    },
+    "dst_conn": {
+        "dbname": "",
+        "host": "",
+        "user": "",
+        "password": ""
+    }
+}
