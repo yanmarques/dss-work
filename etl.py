@@ -19,12 +19,14 @@ def getcon(from_src=True, **kwargs):
 
 
 def handle_summarization(src_cursor, dst_cursor, sales_data):
-    cd_ven, cd_loj, dt_ven, nm_vdd, nm_loj, nm_cli = sales_data
+    cd_ven, cd_loj, cd_cli, cd_vdd, dt_ven, nm_vdd, nm_loj, nm_cli = sales_data
 
     src_cursor.execute(installment_list_from_sale_expr(), (cd_ven, cd_loj))
 
     # calculate the metrics
-    instmnt_preddicted_count, instmnt_late_count, instmnt_paid_count, instmnt_preddicted_value = 0, 0, 0, 0  
+    instmnt_preddicted_count, instmnt_late_count, instmnt_paid_count, \
+            instmnt_preddicted_value = 0, 0, 0, 0
+  
     for installment in src_cursor.fetchall():
         dt_vcto, vl_par, dt_pagto, vl_pago = installment
         
@@ -34,7 +36,7 @@ def handle_summarization(src_cursor, dst_cursor, sales_data):
             instmnt_preddicted_count += 1
             instmnt_preddicted_value += vl_par
 
-        # isolate check for late payments, because it be also be considered as paid
+        # isolate check for late payments, because it may also be considered as paid
         if dt_pagto and dt_vcto < dt_pagto:
             instmnt_late_count += 1
 
@@ -46,35 +48,33 @@ def handle_summarization(src_cursor, dst_cursor, sales_data):
                         (dt_ven.year, dt_ven.month))
         time_dimension = dst_cursor.fetchone()
 
-    dst_cursor.execute('select cd_loja from loja where nm_loja = %s', (nm_loj))
-    store_dimension = dst_cursor.fetchone()
-    if store_dimension is None:
-        dst_cursor.execute('insert into loja (nm_loja) values (%s) returning cd_loja', (nm_loj))
-        store_dimension = dst_cursor.fetchone()
+    dst_cursor.execute('select cd_loja from loja where cd_loja = %d', (cd_loj))
+    if dst_cursor.fetchone() is None:
+        dst_cursor.execute('insert into loja (cd_loja, nm_loja) values (%d, %s)', 
+                            (cd_loj, nm_loj))
 
-    dst_cursor.execute('select cd_cliente from cliente where nm_cliente = %s', (nm_cli))
-    client_dimension = dst_cursor.fetchone()
-    if store_dimension is None:
-        dst_cursor.execute('insert into cliente (nm_cliente) values (%s) returning cd_cliente', (nm_cli))
-        client_dimension = dst_cursor.fetchone()
+    dst_cursor.execute('select cd_cliente from cliente where cd_cliente = %d', (cd_cli))
+    if dst_cursor.fetchone() is None:
+        dst_cursor.execute('insert into cliente (cd_cliente, nm_cliente) values (%d, %s)', 
+                            (cd_cli, nm_cli))
 
-    dst_cursor.execute('select cd_vendedor from vendedor where nm_vendedor = %s', (nm_vdd))
-    sales_man_dimension = dst_cursor.fetchone()
-    if sales_man_dimension is None:
-        dst_cursor.execute('INSERT INTO vendedor (nm_vendedor) values (%s) returning cd_vendedor', (nm_vdd))
-        sales_man_dimension = dst_cursor.fetchone()
+    dst_cursor.execute('select cd_vendedor from vendedor where cd_vendedor = %d', (cd_vdd))
+    if dst_cursor.fetchone() is None:
+        dst_cursor.execute('insert into vendedor (cd_vendedor, nm_vendedor) values (%d, %s)', 
+                            (cd_vdd, nm_vdd))
 
     # actually insert data into fact table
     dst_cursor.execute("""
 insert into venda 
-(cd_venda, cdt_tempo, cd_cliente, cd_vendedor, nr_par_previstas, nr_par_atrasadas, nr_par_pagas, vlr_par_previstas)
+(cd_venda, cdt_tempo, cd_loja, cd_cliente, cd_vendedor, nr_par_previstas, nr_par_atrasadas, nr_par_pagas, vlr_par_previstas)
 values
 (%d, %d, %d, %d, %d, %d %d, %d)
 """, (
     cd_ven, 
     time_dimension[0],
-    client_dimension[0],
-    sales_man_dimension[0], 
+    cd_loj,
+    cd_cli,
+    cd_vdd, 
     instmnt_preddicted_count,
     instmnt_late_count,
     instmnt_paid_count,
@@ -89,6 +89,8 @@ def sales_list_expr():
 select 
     ven.cd_ven,
     ven.cd_loj,
+    ven.cd_cli,
+    ven.cd_vdd,
     ven.dt_ven,
     vdd.nm_vdd,
     loj.nm_loj,
