@@ -41,34 +41,42 @@ def handle_summarization(src_cursor, dst_cursor, sales_data):
             instmnt_late_count += 1
 
     dst_cursor.execute('select cd_tempo from tempo where ano = %s and mes = %s', 
-                    (dt_ven.year, dt_ven.month))
+                    (str(dt_ven.year), str(dt_ven.month)))
     time_dimension = dst_cursor.fetchone() 
     if time_dimension is None:
         dst_cursor.execute('insert into tempo (ano, mes) values (%s, %s) returning cd_tempo', 
                         (dt_ven.year, dt_ven.month))
         time_dimension = dst_cursor.fetchone()
 
-    dst_cursor.execute('select cd_loja from loja where cd_loja = %d', (cd_loj))
+    dst_cursor.execute('select cd_loja from loja where cd_loja = %s', [cd_loj])
     if dst_cursor.fetchone() is None:
-        dst_cursor.execute('insert into loja (cd_loja, nm_loja) values (%d, %s)', 
+        dst_cursor.execute('insert into loja (cd_loja, nm_loja) values (%s, %s)', 
                             (cd_loj, nm_loj))
 
-    dst_cursor.execute('select cd_cliente from cliente where cd_cliente = %d', (cd_cli))
+    dst_cursor.execute('select cd_cliente from cliente where cd_cliente = %s', [cd_cli])
     if dst_cursor.fetchone() is None:
-        dst_cursor.execute('insert into cliente (cd_cliente, nm_cliente) values (%d, %s)', 
+        dst_cursor.execute('insert into cliente (cd_cliente, nm_cliente) values (%s, %s)', 
                             (cd_cli, nm_cli))
 
-    dst_cursor.execute('select cd_vendedor from vendedor where cd_vendedor = %d', (cd_vdd))
+    dst_cursor.execute('select cd_vendedor from vendedor where cd_vendedor = %s', [cd_vdd])
     if dst_cursor.fetchone() is None:
-        dst_cursor.execute('insert into vendedor (cd_vendedor, nm_vendedor) values (%d, %s)', 
+        dst_cursor.execute('insert into vendedor (cd_vendedor, nm_vendedor) values (%s, %s)', 
                             (cd_vdd, nm_vdd))
 
     # actually insert data into fact table
     dst_cursor.execute("""
-insert into venda 
-(cd_venda, cdt_tempo, cd_loja, cd_cliente, cd_vendedor, nr_par_previstas, nr_par_atrasadas, nr_par_pagas, vlr_par_previstas)
+insert into venda (
+    cd_venda, 
+    cd_tempo, 
+    cd_loja, 
+    cd_cliente, 
+    cd_vendedor, 
+    nr_par_previstas, 
+    nr_par_atrasadas,
+    nr_par_pagas, 
+    vlr_par_previstas)
 values
-(%d, %d, %d, %d, %d, %d %d, %d)
+(%s, %s, %s, %s, %s, %s, %s, %s, %s)
 """, (
     cd_ven, 
     time_dimension[0],
