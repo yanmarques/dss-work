@@ -18,7 +18,7 @@ def getcon(from_src=True, **kwargs):
     return psycopg2.connect(**conn_args)
 
 
-def handle_summarization(src_cursor, dst_cursor, sales_data):
+def handle_summarization(src_cursor, dst_conn, dst_cursor, sales_data):
     cd_ven, cd_loj, cd_cli, cd_vdd, dt_ven, nm_vdd, nm_loj, nm_cli = sales_data
 
     src_cursor.execute(installment_list_from_sale_expr(), (cd_ven, cd_loj))
@@ -89,7 +89,7 @@ values
     instmnt_preddicted_value))
     
     # commit whole transaction
-    dst_cursor.commit()
+    dst_conn.commit()
 
 
 def sales_list_expr():
@@ -121,10 +121,30 @@ from parcela as par where par.cd_ven = %s and par.cd_loj = %s
 """
 
 
-def init_etl(src_cursor, dst_cursor):
+def init_etl(src_cursor, dst_conn, dst_cursor, initdb=None):
+    # count the number of sales which will be processed
+    src_cursor.execute('select count(*) from venda')
+    sales_count = src_cursor.fetchone()[0]
+    print('INFO: Total> {}'.format(sales_count))
+    
+    # handle database helper file
+    if initdb is not None:
+        print('INFO: Initializing destination database from: {}'.format(initdb))
+        with open(initdb) as sql_reader:
+            dst_cursor.execute(sql_reader.read())
+        print('INFO: Database initialization finished!')
+
+    # create a default mask to bump the progress
+    progress_mask = 'INFO: Progress> %d/{}\r'.format(sales_count) 
+    index = 1
+
+    # fetch all records and process it
     src_cursor.execute(sales_list_expr())
     for data in src_cursor.fetchall():
-        handle_summarization(src_cursor, dst_cursor, data)
+        print(progress_mask % index, end='')
+        handle_summarization(src_cursor, dst_conn, dst_cursor, data)
+        index += 1
+    print('\nINFO: ETL has fineshed')
 
 
 def test_cursor_execute_function(*args):
@@ -144,21 +164,22 @@ def load_config(config=DEFAULT_CONFIG):
 def deduce_connection(cli_args, **kwargs):
     if cli_args:
         kwargs['config'] = cli_args[0]
-    return getcon(**kwargs) 
+    return getcon(**kwargs)
 
 
-def main(args):
+def handle_args(args):
     if '--help' in args:
         print("""
-Usage: {name} [--help] [--test] [CONFIG_FILE]
+Usage: {name} [--help] [--test] [--initdb SQL_FILE] [CONFIG_FILE]
 
 Arguments:
     CONFIG_FILE (optional) Specify a database conneciton configuration. (default={default_config})
 
 Options:
-    --test  Read data from source connection, summarize, but just print what it would do in destination
-            connection.
-    --help  Shows this message.
+    --initdb SQL_FILE   Specify a SQL file to populate database before actually processing the ETL.
+    --test              Read data from source connection, summarize, but just print what it would do in destination
+                        connection.
+    --help              Shows this message.
 """.format(name=sys.argv[0], default_config=DEFAULT_CONFIG))
         return 128
 
@@ -166,12 +187,33 @@ Options:
     if isatest:
         args.remove('--test')
 
+    kwargs = {}
+    if '--initdb' in args:
+        try:
+            kwargs['initdb'] = args.pop(args.index('--initdb') + 1)
+        except IndexError:
+            print('ERROR: Option argument is missing for: --initdb')
+            return 1
+        args.remove('--initdb')
+    return args, kwargs, isatest
+
+
+def main(args):
+    result = handle_args(args)
+
+    # stop here if we received and exit code
+    if isinstance(result, int):
+        return result
+
+    # unpack received data
+    parsed_args, etl_kwargs, isatest = result
+
     # connect to source sgbd
-    src_conn = deduce_connection(args)
+    src_conn = deduce_connection(parsed_args)
     src_cursor = src_conn.cursor()
     
     # connect to destination sgbd
-    dst_conn = deduce_connection(args, from_src=False)
+    dst_conn = deduce_connection(parsed_args, from_src=False)
     dst_cursor = dst_conn.cursor()
 
     # set that we want a 'read committed' level, so that we can commit by ourself
@@ -182,7 +224,11 @@ Options:
     test_cursor.fetchone = test_cursor_fetchone_function
 
     try:
-        init_etl(src_cursor, test_cursor if isatest else dst_cursor)
+        init_etl(
+            src_cursor,
+            dst_conn, 
+            test_cursor if isatest else dst_cursor, 
+            **etl_kwargs)
     except:
         traceback.print_exc()
         return 1
