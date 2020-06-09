@@ -79,7 +79,7 @@ def handle_summarization(src_cursor, dst_conn, dst_cursor, installment):
                         instmnt_preddicted_value)
 
     # lets check on db for an existing sale 
-    dst_cursor.execute(check_sale_existance(), operation_params[:5])
+    dst_cursor.execute(check_sale_existence(), operation_params[:5])
     if dst_cursor.fetchone() is None:
         # insert data into fact table, the parameters order are ok
         sql_to_run = save_sale()
@@ -129,7 +129,7 @@ values
 """
 
 
-def check_sale_existance():
+def check_sale_existence():
     return """
 select
     cd_venda 
