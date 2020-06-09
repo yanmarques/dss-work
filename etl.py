@@ -18,34 +18,38 @@ def getcon(from_src=True, **kwargs):
     return psycopg2.connect(**conn_args)
 
 
-def handle_summarization(src_cursor, dst_conn, dst_cursor, sales_data):
-    cd_ven, cd_loj, cd_cli, cd_vdd, dt_ven, nm_vdd, nm_loj, nm_cli = sales_data
-
-    src_cursor.execute(installment_list_from_sale_expr(), (cd_ven, cd_loj))
+def handle_summarization(src_cursor, dst_conn, dst_cursor, installment):
+    # unpack all received information
+    dt_vcto, vl_par, dt_pagto, vl_pago, cd_ven, cd_loj, cd_cli, cd_vdd, \
+        nm_vdd, nm_loj, nm_cli = installment
 
     # calculate the metrics
     instmnt_preddicted_count, instmnt_late_count, instmnt_paid_count, \
             instmnt_preddicted_value = 0, 0, 0, 0
-  
-    for installment in src_cursor.fetchall():
-        dt_vcto, vl_par, dt_pagto, vl_pago = installment
-        
-        if vl_pago:
-            instmnt_paid_count += 1
-        else:
-            instmnt_preddicted_count += 1
-            instmnt_preddicted_value += vl_par
 
-        # isolate check for late payments, because it may also be considered as paid
-        if dt_pagto and dt_vcto < dt_pagto:
-            instmnt_late_count += 1
+    # deduce which date to put in time dimension
+    if vl_pago:
+        date_in_dimension = dt_pagto
+        
+        # also define that this installment is paid
+        instmnt_paid_count = 1
+    else:
+        date_in_dimension = dt_vcto
+
+        # also define this installment as preddicted  
+        instmnt_preddicted_count = 1
+        instmnt_preddicted_value = vl_par
+
+    # isolate check for late payments, because it may also be considered as paid
+    if dt_pagto and dt_vcto < dt_pagto:
+        instmnt_late_count = 1
 
     dst_cursor.execute('select cd_tempo from tempo where ano = %s and mes = %s', 
-                    (str(dt_ven.year), str(dt_ven.month)))
+                    (str(date_in_dimension.year), str(date_in_dimension.month)))
     time_dimension = dst_cursor.fetchone() 
     if time_dimension is None:
         dst_cursor.execute('insert into tempo (ano, mes) values (%s, %s) returning cd_tempo', 
-                        (dt_ven.year, dt_ven.month))
+                        (date_in_dimension.year, date_in_dimension.month))
         time_dimension = dst_cursor.fetchone()
 
     dst_cursor.execute('select cd_loja from loja where cd_loja = %s', [cd_loj])
@@ -63,8 +67,53 @@ def handle_summarization(src_cursor, dst_conn, dst_cursor, sales_data):
         dst_cursor.execute('insert into vendedor (cd_vendedor, nm_vendedor) values (%s, %s)', 
                             (cd_vdd, nm_vdd))
 
-    # actually insert data into fact table
-    dst_cursor.execute("""
+    # store the parameters to the sql operation for change during runtime
+    operation_params = (cd_ven, 
+                        time_dimension[0],
+                        cd_loj,
+                        cd_cli,
+                        cd_vdd,
+                        instmnt_preddicted_count,
+                        instmnt_late_count,
+                        instmnt_paid_count,
+                        instmnt_preddicted_value)
+
+    # lets check on db for an existing sale 
+    dst_cursor.execute(check_sale_existance(), operation_params[:5])
+    if dst_cursor.fetchone() is None:
+        # insert data into fact table, the parameters order are ok
+        sql_to_run = save_sale()
+    else:
+        # make sure summary is uptaded, change the parameters order because the integers came first
+        sql_to_run = update_sale()
+
+        # swap params because to update we must put installment info. in first positions 
+        operation_params = operation_params[5:] + operation_params[:5]
+
+    # execute then commit whole transaction
+    dst_cursor.execute(sql_to_run, operation_params)
+    dst_conn.commit()
+
+
+def update_sale():
+    return """
+update venda 
+set
+    nr_par_previstas = nr_par_previstas + %s,
+    nr_par_atrasadas = nr_par_atrasadas + %s,
+    nr_par_pagas = nr_par_pagas + %s,
+    vlr_par_previstas = vlr_par_previstas + %s
+where
+    cd_venda = %s and 
+    cd_tempo = %s and
+    cd_loja = %s and
+    cd_cliente = %s and
+    cd_vendedor = %s
+"""
+
+
+def save_sale():
+    return """
 insert into venda (
     cd_venda, 
     cd_tempo, 
@@ -76,57 +125,49 @@ insert into venda (
     nr_par_pagas, 
     vlr_par_previstas)
 values
-(%s, %s, %s, %s, %s, %s, %s, %s, %s)
-""", (
-    cd_ven, 
-    time_dimension[0],
-    cd_loj,
-    cd_cli,
-    cd_vdd, 
-    instmnt_preddicted_count,
-    instmnt_late_count,
-    instmnt_paid_count,
-    instmnt_preddicted_value))
-    
-    # commit whole transaction
-    dst_conn.commit()
-
-
-def sales_list_expr():
-    return """
-select 
-    ven.cd_ven,
-    ven.cd_loj,
-    ven.cd_cli,
-    ven.cd_vdd,
-    ven.dt_ven,
-    vdd.nm_vdd,
-    loj.nm_loj,
-    cli.nm_cli
-from venda as ven
-    left join vendedor as vdd on (ven.cd_vdd = vdd.cd_vdd)
-    left join loja as loj on (ven.cd_loj = loj.cd_loj)
-    left join cliente as cli on (ven.cd_cli = cli.cd_cli)
+    (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
-def installment_list_from_sale_expr():
+def check_sale_existance():
     return """
-select 
-    par.dt_vcto,
-    par.vl_par,
-    par.dt_pagto,
-    par.vl_pago
-from parcela as par where par.cd_ven = %s and par.cd_loj = %s    
+select
+    cd_venda 
+from 
+    venda 
+where
+    cd_venda = %s and
+    cd_tempo = %s and
+    cd_loja = %s and
+    cd_cliente = %s and
+    cd_vendedor = %s
+"""
+
+
+def instmnts_list_expr():
+    return """
+select
+	par.dt_vcto,
+	par.vl_par,
+	par.dt_pagto,
+	par.vl_pago,
+	par.cd_ven,
+	par.cd_loj,
+	ven.cd_cli,
+	ven.cd_vdd,
+	vdd.nm_vdd,
+	loja.nm_loj,
+	cli.nm_cli
+from 
+	parcela as par 
+inner join venda ven on (par.cd_ven = ven.cd_ven and par.cd_loj = ven.cd_loj)
+inner join cliente cli on ven.cd_cli = cli.cd_cli 
+inner join vendedor vdd on ven.cd_vdd = vdd.cd_vdd 
+inner join loja on ven.cd_loj = loja.cd_loj 
 """
 
 
 def init_etl(src_cursor, dst_conn, dst_cursor, initdb=None):
-    # count the number of sales which will be processed
-    src_cursor.execute('select count(*) from venda')
-    sales_count = src_cursor.fetchone()[0]
-    print('INFO: Total> {}'.format(sales_count))
-    
     # handle database helper file
     if initdb is not None:
         print('INFO: Initializing destination database from: {}'.format(initdb))
@@ -134,12 +175,21 @@ def init_etl(src_cursor, dst_conn, dst_cursor, initdb=None):
             dst_cursor.execute(sql_reader.read())
         print('INFO: Database initialization finished!')
 
-    # create a default mask to bump the progress
-    progress_mask = 'INFO: Progress> %d/{}\r'.format(sales_count) 
-    index = 1
+    # count the number of installments that we will fetch
+    # this is done separate to avoid holding all fetched data
+    # in memory so instead we just count it on the db
+    src_cursor.execute('select count(*) from parcela')
+    instmnts_count = src_cursor.fetchone()[0]
 
+    # count the number of sales which will be processed
+    print('INFO: Total> {}'.format(instmnts_count))
+
+    # create a default mask to bump the progress
+    progress_mask = 'INFO: Progress> %d/{}\r'.format(instmnts_count) 
+    index = 1
+    
     # fetch all records and process it
-    src_cursor.execute(sales_list_expr())
+    src_cursor.execute(instmnts_list_expr())
     for data in src_cursor.fetchall():
         print(progress_mask % index, end='')
         handle_summarization(src_cursor, dst_conn, dst_cursor, data)
