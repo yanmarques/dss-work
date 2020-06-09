@@ -33,16 +33,16 @@ def handle_summarization(src_cursor, dst_conn, dst_cursor, installment):
         
         # also define that this installment is paid
         instmnt_paid_count = 1
+
+        # was it paid after the scheduled date
+        if dt_vcto < dt_pagto:
+            instmnt_late_count = 1
     else:
         date_in_dimension = dt_vcto
 
         # also define this installment as preddicted  
         instmnt_preddicted_count = 1
         instmnt_preddicted_value = vl_par
-
-    # isolate check for late payments, because it may also be considered as paid
-    if dt_pagto and dt_vcto < dt_pagto:
-        instmnt_late_count = 1
 
     dst_cursor.execute('select cd_tempo from tempo where ano = %s and mes = %s', 
                     (str(date_in_dimension.year), str(date_in_dimension.month)))
